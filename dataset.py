@@ -1,3 +1,12 @@
+'''
+in your files, to work with dataset you can do:
+  from dataset import load_data  
+  X_train, X_test, y_train, y_test = load_data()
+
+and then use X_train, X_test, y_train, y_test
+
+'''
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
