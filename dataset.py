@@ -43,7 +43,7 @@ def load_data():
   np_scaled = min_max_scaler.fit_transform(X)
   X = pd.DataFrame(np_scaled, columns=cols) # turns np_scaled back into a Pandas DataFrame.
   X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
+  return X_train, X_test, y_train, y_test
 
 
 # Shape of X_train: (6993, 58)
