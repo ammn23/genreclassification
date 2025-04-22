@@ -4,12 +4,16 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import time
 import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+
 from dataset_for_mlp import load_data
 from gnb_complex_64_final import EnhancedGaussianNB, preprocess_data
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
+from sklearn.kernel_approximation import RBFSampler
 
+# epoch change
 
 # Activation functions and their derivatives
 class Activations:
@@ -97,7 +101,7 @@ class MLP:
 
         return activations, pre_activations
 
-    def backpropagation(self, X, y, learning_rate=0.01, batch_size=32, n_epochs=100,
+    def backpropagation(self, X, y, learning_rate=0.01, batch_size=32, n_epochs=1000,
                         early_stopping=True, patience=10, validation_data=None,
                         verbose=True):
         n_samples = X.shape[0]
@@ -277,6 +281,11 @@ def prepare_data_with_gnb(X_train_orig, X_test_orig, y_train, y_test,
 
     return X_train_basic, X_test_basic, X_train_enhanced, X_test_enhanced
 
+def apply_kernel_mapping(X_train,X_test,gamma=0.1,n_components=100):
+    rbf_feature = RBFSampler(gamma=gamma, n_components=n_components, random_state=42)
+    X_train_mapped = rbf_feature.fit_transform(X_train)
+    X_test_mapped = rbf_feature.transform(X_test)
+    return X_train_mapped, X_test_mapped
 
 def evaluate_model(model, X_test, y_test, model_name="Model", class_names=None):
     """
@@ -410,7 +419,6 @@ def main():
         X_train_basic, y_train_split,
         learning_rate=0.001,
         batch_size=32,
-        n_epochs=100,
         early_stopping=True,
         patience=10,
         validation_data=(X_val_basic, y_val),
@@ -429,7 +437,6 @@ def main():
         X_train_enhanced, y_train_split,
         learning_rate=0.001,
         batch_size=32,
-        n_epochs=100,
         early_stopping=True,
         patience=10,
         validation_data=(X_val_enhanced, y_val),
@@ -474,6 +481,42 @@ def main():
     print(sklearn_report_basic)
 
     plot_confusion_matrix(sklearn_cm_basic, class_names, title='Scikit-learn MLP Confusion Matrix(basic)')
+
+    # 10. Train Kernel-Enhanced MLP (using RBF features)
+    print("\n--- Training Kernel-Enhanced MLP (with GNB + RBF kernel) ---")
+
+    # Apply kernel transformation on enhanced features
+    X_train_kernel, X_test_kernel = apply_kernel_mapping(X_train_enhanced, X_test_enhanced,
+                                                         gamma=0.01, n_components=100)
+
+    # Split for validation
+    X_train_kernel, X_val_kernel = train_test_split(
+        X_train_kernel, test_size=0.15, random_state=42)
+
+    kernel_layers = [X_train_kernel.shape[1], 64, n_classes]
+    kernel_activations = ['relu', 'softmax']
+
+    kernel_mlp = MLP(kernel_layers, kernel_activations)
+
+    kernel_history = kernel_mlp.backpropagation(
+        X_train_kernel, y_train_split,
+        learning_rate=0.0005,
+        batch_size=32,
+        early_stopping=True,
+        patience=15,
+        validation_data=(X_val_kernel, y_val),
+        verbose=True
+    )
+
+    kernel_results = evaluate_model(
+        kernel_mlp, X_test_kernel, y_test,
+        model_name="Kernel-Enhanced MLP",
+        class_names=class_names
+    )
+
+    plot_training_history(kernel_history, title='Kernel-Enhanced MLP Training History')
+    plot_confusion_matrix(kernel_results['confusion_matrix'], class_names, title='Kernel-Enhanced MLP Confusion Matrix')
+
 
     print("\n--- Training scikit-learn MLPClassifier(enhanced) ---")
 
@@ -521,6 +564,7 @@ def main():
     print("\n--- Model Comparison ---")
     print(f"Baseline MLP Accuracy: {baseline_results['accuracy']:.4f}")
     print(f"Enhanced MLP Accuracy: {enhanced_results['accuracy']:.4f}")
+    print(f"Kernel-Enhanced MLP Accuracy: {kernel_results['accuracy']:.4f}")
     print(f"Scikit-learn MLP Accuracy(basic): {sklearn_accuracy_basic:.4f}")
     print(f"Scikit-learn MLP Accuracy(enhanced): {sklearn_accuracy:.4f}")
     print(f"Improvement: {enhanced_results['accuracy'] - baseline_results['accuracy']:.4f}")
