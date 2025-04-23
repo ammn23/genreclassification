@@ -8,7 +8,6 @@ warnings.filterwarnings('ignore')
 def extract_features(file_path, label=None):
     try:
         y, sr = librosa.load(file_path, sr=None)
-        
         filename = os.path.basename(file_path)
         length = len(y)
         
@@ -97,7 +96,6 @@ def extract_features(file_path, label=None):
         return None
 
 def extract_features_from_directory(directory_path, label=None):
-    # Returns DataFrame containing features for all files "pd.DataFrame"
     features_list = []
     
     for file in os.listdir(directory_path):
@@ -114,31 +112,102 @@ def extract_features_from_directory(directory_path, label=None):
     else:
         return None
 
-def main():
+def extract_features_from_file_list(file_list, labels=None):
+    """
+    Extract features from a list of individual files
     
+    Parameters:
+    file_list (list): List of file paths
+    labels (list): Optional list of labels corresponding to each file
+    
+    Returns:
+    pd.DataFrame: DataFrame containing features for all files
+    """
+    features_list = []
+    
+    for i, file_path in enumerate(file_list):
+        label = labels[i] if labels and i < len(labels) else None
+        features = extract_features(file_path, label)
+        if features:
+            features_list.append(features)
+    
+    # Create DataFrame
+    if features_list:
+        return pd.DataFrame(features_list)
+    else:
+        return None
+
+def main():
     audio_directories = {
         'blues': '/Users/dilyaraarynova/MLProject/exp_data/blues',
         'jazz': '/Users/dilyaraarynova/MLProject/exp_data/jazz',
         # ...etc
     }
     
+    individual_files = {
+        'blues': [
+            '/Users/dilyaraarynova/MLProject/exp_data/blues/blues.00000.wav',
+            '/Users/dilyaraarynova/MLProject/exp_data/blues/blues.00001.wav'
+        ],
+        'jazz': [
+            '/Users/dilyaraarynova/MLProject/exp_data/jazz/jazz.00000.wav'
+        ]
+    }
+    
     all_features = []
-
+    
+    print("Processing individual files...")
+    for label, files in individual_files.items():
+        file_features = []
+        for file_path in files:
+            print(f"Extracting features from {os.path.basename(file_path)}...")
+            features = extract_features(file_path, label)
+            if features:
+                file_features.append(features)
+        
+        if file_features:
+            features_df = pd.DataFrame(file_features)
+            all_features.append(features_df)
+    
+    print("\nProcessing directories...")
     for label, directory in audio_directories.items():
-        print(f"Extracting features from {label} files...")
+        print(f"Extracting features from {label} directory...")
         features_df = extract_features_from_directory(directory, label)
         if features_df is not None:
             all_features.append(features_df)
-  
-    # combine features into a single DataFrame
+    
     if all_features:
         combined_df = pd.concat(all_features, ignore_index=True)
         
+        # Save features to CSV
         combined_df.to_csv('extracted_audio_features.csv', index=False)
         print(f"Features saved to extracted_audio_features.csv")
-        
     else:
         print("No features were extracted.")
 
+# for a single file
+def process_single_file(file_path, label=None, output_csv=None):
+
+    print(f"Extracting features from {os.path.basename(file_path)}...")
+    features = extract_features(file_path, label)
+    
+    if features:
+        df = pd.DataFrame([features])
+        
+        if output_csv:
+            df.to_csv(output_csv, index=False)
+            print(f"Features saved to {output_csv}")
+            return None
+        else:
+            return df
+    else:
+        print("No features were extracted.")
+        return None
+
 if __name__ == "__main__":
+    
     main()
+    
+    # Option 2: Process a single file
+    # file_path = '/Users/dilyaraarynova/MLProject/exp_data/blues/blues.00000.wav'
+    # process_single_file(file_path, label='blues', output_csv='single_file_features.csv')
