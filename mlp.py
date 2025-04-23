@@ -2,18 +2,20 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import Dense, Input
+from sklearn.svm import SVC
 import time
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 
 from dataset_for_mlp import load_data
-from gnb_complex_64_final import EnhancedGaussianNB, preprocess_data
+from gnb_simple_52_final import CustomGaussianNB
+from gnb_complex_64_final import preprocess_data
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
-from sklearn.kernel_approximation import RBFSampler
 
-# epoch change
 
 # Activation functions and their derivatives
 class Activations:
@@ -56,48 +58,55 @@ class MLP:
         self.n_layers = len(layer_sizes) - 1  # Number of weight matrices needed
         self.activations = activations
 
+        # Check dimensions
+        if len(activations) != self.n_layers:
+            raise ValueError(f"Got {len(activations)} activation functions for {self.n_layers} layers")
+
         # Activation function mapping
         self.activation_funcs = {
             'relu': (Activations.relu, Activations.relu_derivative),
             'tanh': (Activations.tanh, Activations.tanh_derivative),
             'sigmoid': (Activations.sigmoid, Activations.sigmoid_derivative),
-            'softmax': (Activations.softmax, None)  # Softmax derivative is handled specially in backprop
+            'softmax': (Activations.softmax, None)  # Softmax derivative is handled specially
         }
 
         # Initialize random number generator
         self.rng = np.random.RandomState(random_state)
 
-        # Initialize weights and biases with He initialization
+        # Initialize weights and biases
         self.weights = []
         self.biases = []
 
         for i in range(self.n_layers):
-            # He initialization for weights: sqrt(2/n_in)
-            scale = np.sqrt(2 / layer_sizes[i])
+            # He initialization for ReLU: sqrt(2/n_in)
+            # Xavier initialization for sigmoid/tanh: sqrt(1/n_in)
+            if self.activations[i] == 'relu':
+                scale = np.sqrt(2 / layer_sizes[i])
+            else:
+                scale = np.sqrt(1 / layer_sizes[i])
+
             self.weights.append(self.rng.normal(0, scale, size=(layer_sizes[i], layer_sizes[i + 1])))
             self.biases.append(np.zeros((1, layer_sizes[i + 1])))
 
     def forward(self, X):
-        activations = [X]  # Store activations for each layer, starting with input
-        pre_activations = []  # Store pre-activation values for backpropagation
+        activations = [X]  # Start with input layer
+        pre_activations = []
 
-        # Process all layers except the output layer
-        for i in range(self.n_layers - 1):
+        # Process all layers
+        for i in range(self.n_layers):
+            # Linear transformation: z = X*W + b
             z = np.dot(activations[-1], self.weights[i]) + self.biases[i]
             pre_activations.append(z)
 
             # Apply activation function
-            activation_func = self.activation_funcs[self.activations[i]][0]
-            a = activation_func(z)
+            if i == self.n_layers - 1 and self.activations[i] == 'softmax':
+                # Special case for softmax output layer
+                a = Activations.softmax(z)
+            else:
+                activation_func = self.activation_funcs[self.activations[i]][0]
+                a = activation_func(z)
+
             activations.append(a)
-
-        # Process output layer separately for softmax
-        z_out = np.dot(activations[-1], self.weights[-1]) + self.biases[-1]
-        pre_activations.append(z_out)
-
-        # Apply output activation (softmax for multi-class classification)
-        a_out = Activations.softmax(z_out)
-        activations.append(a_out)
 
         return activations, pre_activations
 
@@ -106,6 +115,9 @@ class MLP:
                         verbose=True):
         n_samples = X.shape[0]
         n_classes = self.layer_sizes[-1]
+
+        if len(y) != n_samples:
+            raise ValueError(f"X has {n_samples} samples but y has {len(y)} samples")
 
         # Convert y to one-hot encoding
         y_onehot = np.zeros((n_samples, n_classes))
@@ -119,7 +131,7 @@ class MLP:
             'val_accuracy': []
         }
 
-        # Initialize early stopping variables
+        # Early stopping variables
         best_val_loss = float('inf')
         no_improvement_count = 0
         best_weights = None
@@ -138,35 +150,42 @@ class MLP:
             for i in range(0, n_samples, batch_size):
                 X_batch = X_shuffled[i:i + batch_size]
                 y_batch = y_onehot_shuffled[i:i + batch_size]
+                batch_size_actual = X_batch.shape[0]  # May be smaller than batch_size at the end
 
                 # Forward pass
                 activations, pre_activations = self.forward(X_batch)
                 y_pred = activations[-1]
 
                 # Compute batch loss (cross-entropy)
-                batch_loss = -np.sum(y_batch * np.log(np.clip(y_pred, 1e-10, 1.0))) / X_batch.shape[0]
+                epsilon = 1e-10  # For numerical stability
+                batch_loss = -np.sum(y_batch * np.log(np.clip(y_pred, epsilon, 1.0))) / batch_size_actual
                 losses.append(batch_loss)
 
-                # Backpropagation
-                # For output layer, delta is (y_pred - y_true)
-                delta = y_pred - y_batch
+                # Backward pass
+                # Initialize gradients
+                dW = [np.zeros_like(w) for w in self.weights]
+                db = [np.zeros_like(b) for b in self.biases]
 
-                # Update weights for output layer
-                self.weights[-1] -= learning_rate * np.dot(activations[-2].T, delta) / X_batch.shape[0]
-                self.biases[-1] -= learning_rate * np.mean(delta, axis=0, keepdims=True)
+                # Output layer delta: for softmax + cross-entropy, delta = (y_pred - y_true)
+                delta = y_pred - y_batch  # shape: (batch_size, n_classes)
 
-                # Backpropagate error through hidden layers
-                for j in range(self.n_layers - 2, -1, -1):
-                    # Compute delta for current layer
-                    delta = np.dot(delta, self.weights[j + 1].T)
+                # Backpropagate through the network
+                for l in range(self.n_layers - 1, -1, -1):
+                    # Compute gradients for this layer
+                    dW[l] = np.dot(activations[l].T, delta) / batch_size_actual
+                    db[l] = np.sum(delta, axis=0, keepdims=True) / batch_size_actual
 
-                    # Apply derivative of activation function
-                    activation_derivative = self.activation_funcs[self.activations[j]][1]
-                    delta *= activation_derivative(pre_activations[j])
+                    # Backpropagate delta to previous layer (if not the input layer)
+                    if l > 0:
+                        delta = np.dot(delta, self.weights[l].T)
+                        # Apply activation derivative
+                        activation_derivative = self.activation_funcs[self.activations[l - 1]][1]
+                        delta *= activation_derivative(pre_activations[l - 1])
 
-                    # Update weights and biases
-                    self.weights[j] -= learning_rate * np.dot(activations[j].T, delta) / X_batch.shape[0]
-                    self.biases[j] -= learning_rate * np.mean(delta, axis=0, keepdims=True)
+                # Update weights and biases using gradients
+                for l in range(self.n_layers):
+                    self.weights[l] -= learning_rate * dW[l]
+                    self.biases[l] -= learning_rate * db[l]
 
             # Compute epoch metrics
             activations, _ = self.forward(X)
@@ -177,7 +196,7 @@ class MLP:
             history['loss'].append(train_loss)
             history['accuracy'].append(train_accuracy)
 
-            # Compute validation metrics if validation data is provided
+            # Compute validation metrics
             if validation_data is not None:
                 X_val, y_val = validation_data
                 n_val_samples = X_val.shape[0]
@@ -226,14 +245,16 @@ class MLP:
         return history
 
     def predict_proba(self, X):
-        """Predict class probabilities"""
+        """Predict class probabilities for input X"""
         activations, _ = self.forward(X)
         return activations[-1]
 
     def predict(self, X):
-        """Predict class labels"""
+        """Predict class labels for input X"""
         probas = self.predict_proba(X)
         return np.argmax(probas, axis=1)
+
+
 
 
 # Function to create and preprocess data for the enhanced MLP
@@ -265,7 +286,7 @@ def prepare_data_with_gnb(X_train_orig, X_test_orig, y_train, y_test,
 
     # --- Train GNB for enhanced features ---
     print(f"Training GNB for enhanced features...")
-    gnb = EnhancedGaussianNB(epsilon=epsilon, class_weight_adjustment=class_weight_adjustment)
+    gnb = CustomGaussianNB()
     gnb.fit(X_train_basic, y_train)
 
     # --- Get probability predictions from GNB ---
@@ -281,34 +302,9 @@ def prepare_data_with_gnb(X_train_orig, X_test_orig, y_train, y_test,
 
     return X_train_basic, X_test_basic, X_train_enhanced, X_test_enhanced
 
-def apply_kernel_mapping(X_train,X_test,gamma=0.1,n_components=100):
-    rbf_feature = RBFSampler(gamma=gamma, n_components=n_components, random_state=42)
-    X_train_mapped = rbf_feature.fit_transform(X_train)
-    X_test_mapped = rbf_feature.transform(X_test)
-    return X_train_mapped, X_test_mapped
+
 
 def evaluate_model(model, X_test, y_test, model_name="Model", class_names=None):
-    """
-    Evaluate model performance
-
-    Parameters:
-    -----------
-    model : MLP
-        Trained MLP model
-    X_test : array-like
-        Test data
-    y_test : array-like
-        True labels
-    model_name : str
-        Name of the model for display
-    class_names : list
-        List of class names for visualization
-
-    Returns:
-    --------
-    results : dict
-        Dictionary with evaluation results
-    """
     print(f"\n--- Evaluating {model_name} ---")
     start_time = time.time()
     y_pred = model.predict(X_test)
@@ -339,6 +335,7 @@ def evaluate_model(model, X_test, y_test, model_name="Model", class_names=None):
     }
 
 
+
 def plot_confusion_matrix(cm, class_names, title='Confusion Matrix'):
     """Plot confusion matrix"""
     plt.figure(figsize=(10, 8))
@@ -349,6 +346,7 @@ def plot_confusion_matrix(cm, class_names, title='Confusion Matrix'):
     plt.xlabel('Predicted Label')
     plt.tight_layout()
     plt.show()
+
 
 
 def plot_training_history(history, title='Training History'):
@@ -378,210 +376,314 @@ def plot_training_history(history, title='Training History'):
     plt.show()
 
 
+
 def main():
     # 1. Load data
     print("Loading data...")
-    X_train_full, X_test_full, y_train, y_test = load_data()
+    # Assuming load_data() returns X_train_full, X_test_full, y_train, y_test
+    X_train_full, X_test_full, y_train_full, y_test = load_data()  # Use y_train_full initially
 
     # 2. Define genre mapping
     genre_mapping = {0: 'blues', 1: 'classical', 2: 'country', 3: 'disco', 4: 'hiphop',
                      5: 'jazz', 6: 'metal', 7: 'pop', 8: 'reggae', 9: 'rock'}
     class_names = [genre_mapping[i] for i in range(len(genre_mapping))]
+    n_classes = len(class_names)
 
     # 3. Prepare data for both baseline MLP and enhanced MLP
-    X_train_basic, X_test_basic, X_train_enhanced, X_test_enhanced = prepare_data_with_gnb(
-        X_train_full, X_test_full, y_train, y_test,
+    X_train_basic_full, X_test_basic, X_train_enhanced_full, X_test_enhanced = prepare_data_with_gnb(
+        X_train_full, X_test_full, y_train_full, y_test,
         apply_feature_selection=True,
-        n_features=40
+        n_features=40,
+        apply_transformation=True  # Keep settings from original code
     )
 
-    # Create a small validation set for early stopping
-    X_train_basic, X_val_basic, y_train_split, y_val = train_test_split(
-        X_train_basic, y_train, test_size=0.15, random_state=42)
+    # 4. Create a consistent training/validation split *once*
+    # Use stratified split if classes might be imbalanced
+    print("\nSplitting data into training and validation sets...")
+    X_train_basic, X_val_basic, y_train, y_val = train_test_split(
+        X_train_basic_full, y_train_full, test_size=0.15, random_state=42, stratify=y_train_full)
 
-    X_train_enhanced, X_val_enhanced = train_test_split(
-        X_train_enhanced, test_size=0.15, random_state=42)[0:2]
+    # Apply the *same* split to the enhanced features
+    X_train_enhanced, X_val_enhanced, _, _ = train_test_split(
+        X_train_enhanced_full, y_train_full, test_size=0.15, random_state=42, stratify=y_train_full)
+
+    print(f"Shapes after split:")
+    print(f"  X_train_basic: {X_train_basic.shape}, y_train: {y_train.shape}")
+    print(f"  X_val_basic: {X_val_basic.shape}, y_val: {y_val.shape}")
+    print(f"  X_train_enhanced: {X_train_enhanced.shape}")
+    print(f"  X_val_enhanced: {X_val_enhanced.shape}")
 
     n_features_basic = X_train_basic.shape[1]
     n_features_enhanced = X_train_enhanced.shape[1]
-    n_classes = len(genre_mapping)
 
-    # 4. Define network architecture for baseline MLP
-    # We'll use ReLU for hidden layers and Softmax for output layer
-    # The baseline MLP takes only the original features
+    # 5. Define network architecture for baseline MLP
     baseline_layers = [n_features_basic, 128, 64, n_classes]
     baseline_activations = ['relu', 'relu', 'softmax']
 
     print("\n--- Training Baseline MLP ---")
-    baseline_mlp = MLP(baseline_layers, baseline_activations)
+    baseline_mlp = MLP(baseline_layers, baseline_activations, random_state=42)
 
     baseline_history = baseline_mlp.backpropagation(
-        X_train_basic, y_train_split,
+        X_train_basic, y_train,
         learning_rate=0.001,
         batch_size=32,
         early_stopping=True,
-        patience=10,
+        patience=15,  # Increased patience slightly
         validation_data=(X_val_basic, y_val),
         verbose=True
     )
 
-    # 5. Define network architecture for enhanced MLP
-    # The enhanced MLP takes original features + GNB probabilities
+
+
+
+
+    # 6. Define network architecture for enhanced MLP
     enhanced_layers = [n_features_enhanced, 128, 64, n_classes]
     enhanced_activations = ['relu', 'relu', 'softmax']
 
     print("\n--- Training Enhanced MLP (with GNB probabilities) ---")
-    enhanced_mlp = MLP(enhanced_layers, enhanced_activations)
+    enhanced_mlp = MLP(enhanced_layers, enhanced_activations, random_state=42)
 
     enhanced_history = enhanced_mlp.backpropagation(
-        X_train_enhanced, y_train_split,
+        X_train_enhanced, y_train,
         learning_rate=0.001,
         batch_size=32,
         early_stopping=True,
-        patience=10,
+        patience=15,  # Increased patience slightly
         validation_data=(X_val_enhanced, y_val),
         verbose=True
     )
 
-    # 6. Evaluate models
+
+
+
+    # 7. Evaluate custom models
     baseline_results = evaluate_model(
         baseline_mlp, X_test_basic, y_test,
-        model_name="Baseline MLP",
+        model_name="Baseline MLP (Custom)",
         class_names=class_names
     )
 
     enhanced_results = evaluate_model(
         enhanced_mlp, X_test_enhanced, y_test,
-        model_name="Enhanced MLP (with GNB probabilities)",
+        model_name="Enhanced MLP (Custom, with GNB probabilities)",
         class_names=class_names
     )
 
-    print("\n--- Training scikit-learn MLPClassifier(basic) ---")
+    # Plot custom model histories
+    plot_training_history(baseline_history, title='Baseline MLP (Custom) Training History')
+    plot_training_history(enhanced_history, title='Enhanced MLP (Custom) Training History')
 
-    # Initialize sklearn MLP (comparable architecture)
+    # --- Scikit-learn Models ---
+
+    print("\n--- Training scikit-learn MLPClassifier (basic) ---")
     sklearn_mlp_basic = MLPClassifier(hidden_layer_sizes=(128, 64),
-                                activation='relu',
-                                solver='adam',
-                                max_iter=300,
-                                early_stopping=True,
-                                random_state=42,
-                                verbose=True)
+                                      activation='relu',
+                                      solver='adam',
+                                      alpha=0.0001,  # Default L2
+                                      batch_size='auto',
+                                      learning_rate_init=0.001,  # Default
+                                      max_iter=500,  # Increased max_iter
+                                      early_stopping=True,
+                                      validation_fraction=0.1,  # Uses 10% of training data for validation
+                                      n_iter_no_change=15,  # Similar to patience
+                                      random_state=42,
+                                      verbose=False)  # Quieter training
 
-    # Fit on the same enhanced features for fair comparison
-    sklearn_mlp_basic.fit(X_train_basic, y_train_split)
+# Fit on the basic training data
+    print("Fitting sklearn MLP (basic)...")
+    sklearn_mlp_basic.fit(X_train_basic, y_train)
+    print("Fitting done.")
 
-    # Predict and evaluate
-    sklearn_y_pred_basic = sklearn_mlp_basic.predict(X_test_basic)
-    sklearn_accuracy_basic = accuracy_score(y_test, sklearn_y_pred_basic)
-    sklearn_cm_basic = confusion_matrix(y_test, sklearn_y_pred_basic)
-    sklearn_report_basic = classification_report(y_test, sklearn_y_pred_basic, target_names=class_names)
-
-    print(f"Accuracy: {sklearn_accuracy_basic:.4f}")
-    print("\nClassification Report:")
-    print(sklearn_report_basic)
-
-    plot_confusion_matrix(sklearn_cm_basic, class_names, title='Scikit-learn MLP Confusion Matrix(basic)')
-
-    # 10. Train Kernel-Enhanced MLP (using RBF features)
-    print("\n--- Training Kernel-Enhanced MLP (with GNB + RBF kernel) ---")
-
-    # Apply kernel transformation on enhanced features
-    X_train_kernel, X_test_kernel = apply_kernel_mapping(X_train_enhanced, X_test_enhanced,
-                                                         gamma=0.01, n_components=100)
-
-    # Split for validation
-    X_train_kernel, X_val_kernel = train_test_split(
-        X_train_kernel, test_size=0.15, random_state=42)
-
-    kernel_layers = [X_train_kernel.shape[1], 64, n_classes]
-    kernel_activations = ['relu', 'softmax']
-
-    kernel_mlp = MLP(kernel_layers, kernel_activations)
-
-    kernel_history = kernel_mlp.backpropagation(
-        X_train_kernel, y_train_split,
-        learning_rate=0.0005,
-        batch_size=32,
-        early_stopping=True,
-        patience=15,
-        validation_data=(X_val_kernel, y_val),
-        verbose=True
-    )
-
-    kernel_results = evaluate_model(
-        kernel_mlp, X_test_kernel, y_test,
-        model_name="Kernel-Enhanced MLP",
+    # Evaluate basic sklearn MLP
+    sklearn_basic_results = evaluate_model(
+        sklearn_mlp_basic, X_test_basic, y_test,
+        model_name="Scikit-learn MLP (basic)",
         class_names=class_names
     )
 
-    plot_training_history(kernel_history, title='Kernel-Enhanced MLP Training History')
-    plot_confusion_matrix(kernel_results['confusion_matrix'], class_names, title='Kernel-Enhanced MLP Confusion Matrix')
+    print("\n--- Training scikit-learn MLPClassifier (enhanced) ---")
+    sklearn_mlp_enhanced = MLPClassifier(hidden_layer_sizes=(128, 64),
+                                         activation='relu',
+                                         solver='adam',
+                                         alpha=0.0001,
+                                         batch_size='auto',
+                                         learning_rate_init=0.001,
+                                         max_iter=500,
+                                         early_stopping=True,
+                                         validation_fraction=0.1,
+                                         n_iter_no_change=15,
+                                         random_state=42,
+                                         verbose=False)
 
+    # Fit on the enhanced training data
+    print("Fitting sklearn MLP (enhanced)...")
+    sklearn_mlp_enhanced.fit(X_train_enhanced, y_train)
+    print("Fitting done.")
 
-    print("\n--- Training scikit-learn MLPClassifier(enhanced) ---")
-
-    # Initialize sklearn MLP (comparable architecture)
-    sklearn_mlp = MLPClassifier(hidden_layer_sizes=(128, 64),
-                                activation='relu',
-                                solver='adam',
-                                max_iter=300,
-                                early_stopping=True,
-                                random_state=42,
-                                verbose=True)
-
-    # Fit on the same enhanced features for fair comparison
-    sklearn_mlp.fit(X_train_enhanced, y_train_split)
-
-    # Predict and evaluate
-    sklearn_y_pred = sklearn_mlp.predict(X_test_enhanced)
-    sklearn_accuracy = accuracy_score(y_test, sklearn_y_pred)
-    sklearn_cm = confusion_matrix(y_test, sklearn_y_pred)
-    sklearn_report = classification_report(y_test, sklearn_y_pred, target_names=class_names)
-
-    print(f"Accuracy: {sklearn_accuracy:.4f}")
-    print("\nClassification Report:")
-    print(sklearn_report)
-
-    plot_confusion_matrix(sklearn_cm, class_names, title='Scikit-learn MLP Confusion Matrix')
-
-    # 7. Plot results
-    plot_training_history(baseline_history, title='Baseline MLP Training History')
-    plot_training_history(enhanced_history, title='Enhanced MLP Training History')
-
-    plot_confusion_matrix(
-        baseline_results['confusion_matrix'],
-        class_names,
-        title='Baseline MLP Confusion Matrix'
+    # Evaluate enhanced sklearn MLP
+    sklearn_enhanced_results = evaluate_model(
+        sklearn_mlp_enhanced, X_test_enhanced, y_test,
+        model_name="Scikit-learn MLP (enhanced)",
+        class_names=class_names
     )
 
-    plot_confusion_matrix(
-        enhanced_results['confusion_matrix'],
-        class_names,
-        title='Enhanced MLP Confusion Matrix'
+    # Done with scikit-learn MLP
+
+    # ---Moving to SVM---
+    print("\n--- Training scikit-learn MLPClassifier+library SVM ---")
+
+    def relu(X):
+        return np.maximum(0, X)
+
+    def extract_mlp_features(X, model):
+        W1, W2, W3 = model.coefs_[0], model.coefs_[1], model.coefs_[2]
+        b1, b2, b3 = model.intercepts_[0], model.intercepts_[1], model.intercepts_[2]
+
+        h1 = relu(np.dot(X, W1) + b1)
+        h2 = relu(np.dot(h1, W2) + b2)
+        return h2
+
+    # Step 1: Extract features from MLP hidden layer
+    print("Extracting MLP hidden features...")
+    X_train_mlp_features_baslib = extract_mlp_features(X_train_basic, sklearn_mlp_basic)
+    X_test_mlp_features_baslib = extract_mlp_features(X_test_basic, sklearn_mlp_basic)
+
+    # Normalize hidden outputs
+    scaler = StandardScaler()
+    X_train_mlp_features_baslib = scaler.fit_transform(X_train_mlp_features_baslib)
+    X_test_mlp_features_baslib = scaler.transform(X_test_mlp_features_baslib)
+
+    # Step 2: Train SVM on hidden features
+    svm_lib = SVC(kernel='rbf', C=10, gamma='scale')
+    svm_lib.fit(X_train_mlp_features_baslib, y_train)
+
+    print("\n--- SVM on MLP Hidden Features ---")
+    svm_results_basic_lib = evaluate_model(
+        svm_lib, X_test_mlp_features_baslib, y_test,
+        model_name="SVM on MLP Hidden Features",
+        class_names=class_names
     )
 
-    # 8. Compare results
-    print("\n--- Model Comparison ---")
-    print(f"Baseline MLP Accuracy: {baseline_results['accuracy']:.4f}")
-    print(f"Enhanced MLP Accuracy: {enhanced_results['accuracy']:.4f}")
-    print(f"Kernel-Enhanced MLP Accuracy: {kernel_results['accuracy']:.4f}")
-    print(f"Scikit-learn MLP Accuracy(basic): {sklearn_accuracy_basic:.4f}")
-    print(f"Scikit-learn MLP Accuracy(enhanced): {sklearn_accuracy:.4f}")
-    print(f"Improvement: {enhanced_results['accuracy'] - baseline_results['accuracy']:.4f}")
+    print("\n--- Training scikit-learn MLPClassifier+SVM+NB ---")
 
-    return {
-        'baseline_mlp': baseline_mlp,
-        'enhanced_mlp': enhanced_mlp,
+    # Step 1: Extract features from MLP hidden layer
+    X_train_mlp_features_enhlib = extract_mlp_features(X_train_enhanced, sklearn_mlp_enhanced)
+    X_test_mlp_features_enhlib = extract_mlp_features(X_test_enhanced, sklearn_mlp_enhanced)
+
+    # (Optional) Normalize hidden outputs
+    scaler = StandardScaler()
+    X_train_mlp_features_enhlib = scaler.fit_transform(X_train_mlp_features_enhlib)
+    X_test_mlp_features_enhlib = scaler.transform(X_test_mlp_features_enhlib)
+
+    # Step 2: Train SVM on hidden features
+    svm_enhanced_lib = SVC(kernel='rbf', C=10, gamma='scale')
+    svm_enhanced_lib.fit(X_train_mlp_features_enhlib, y_train)
+
+    # Step 3: Predict and evaluate
+    print("\n--- SVM on MLP Hidden Features ---")
+    svm_results_enhanced_lib = evaluate_model(
+        svm_enhanced_lib, X_test_mlp_features_enhlib, y_test,
+        model_name="SVM on MLP Hidden Features+NB",
+        class_names=class_names
+    )
+
+    # print("\n--- Training MLPClassifier+SVM ---")
+    #
+    # # Step 1: Extract features from MLP hidden layer
+    # X_train_mlp_features_basmlp = extract_mlp_features(X_train_basic, baseline_mlp)
+    # X_test_mlp_features_basmlp = extract_mlp_features(X_test_basic, baseline_mlp)
+    #
+    # # (Optional) Normalize hidden outputs
+    # scaler = StandardScaler()
+    # X_train_mlp_features_basmlp = scaler.fit_transform(X_train_mlp_features_basmlp)
+    # X_test_mlp_features_basmlp = scaler.transform(X_test_mlp_features_basmlp)
+    #
+    # # Step 2: Train SVM on hidden features
+    # svm = SVC(kernel='rbf', C=10, gamma='scale')
+    # svm.fit(X_train_mlp_features_basmlp, y_train)
+    #
+    # # Step 3: Predict and evaluate
+    # print("\n--- SVM on MLP Hidden Features ---")
+    # svm_results_basic_mlp = evaluate_model(
+    #     svm, X_test_mlp_features_basmlp, y_test,
+    #     model_name="SVM on MLP Hidden Features+NB",
+    #     class_names=class_names
+    # )
+    #
+    # print("\n--- Training MLPClassifier+SVM+NB ---")
+    #
+    # # Step 1: Extract features from MLP hidden layer
+    # X_train_mlp_features_enhmlp = extract_mlp_features(X_train_basic, enhanced_mlp)
+    # X_test_mlp_features_enhmlp = extract_mlp_features(X_test_basic, enhanced_mlp)
+    #
+    # # (Optional) Normalize hidden outputs
+    # scaler = StandardScaler()
+    # X_train_mlp_features_enhmlp = scaler.fit_transform(X_train_mlp_features_enhmlp)
+    # X_test_mlp_features_enhmlp = scaler.transform(X_test_mlp_features_enhmlp)
+    #
+    # # Step 2: Train SVM on hidden features
+    # svm_enhanced = SVC(kernel='rbf', C=10, gamma='scale')
+    # svm_enhanced.fit(X_train_mlp_features_enhmlp, y_train)
+    #
+    # # Step 3: Predict and evaluate
+    # print("\n--- SVM on MLP Hidden Features ---")
+    # svm_results_enhanced_mlp = evaluate_model(
+    #     svm_enhanced, X_test_mlp_features_enhmlp, y_test,
+    #     model_name="SVM on MLP Hidden Features+NB",
+    #     class_names=class_names
+    # )
+
+
+
+
+
+    # Final Comparison
+    print("\n--- Final Model Comparison ---")
+    print(f"Baseline MLP (Custom) Accuracy:                {baseline_results['accuracy']:.4f}")
+    print(f"Enhanced MLP (Custom) Accuracy:                {enhanced_results['accuracy']:.4f}")
+    print("-" * 50)
+    print(f"Scikit-learn MLP (basic) Accuracy:             {sklearn_basic_results['accuracy']:.4f}")
+    print(f"Scikit-learn MLP (enhanced) Accuracy:          {sklearn_enhanced_results['accuracy']:.4f}")
+    #svm
+    print(f"Scikit-learn MLP (basic) SVM Accuracy:          {svm_results_basic_lib['accuracy']:.4f}")
+    print(f"Scikit-learn MLP (enhanced) SVM Accuracy:          {svm_results_enhanced_lib['accuracy']:.4f}")
+    # print(f" MLP (basic) SVM Accuracy:          {svm_results_basic_mlp['accuracy']:.4f}")
+    # print(f"MLP (enhanced) SVM Accuracy:          {svm_results_enhanced_mlp['accuracy']:.4f}")
+
+
+    # Plot confusion matrices for key models
+    plot_confusion_matrix(baseline_results['confusion_matrix'], class_names,
+                          title='Baseline MLP (Custom) Confusion Matrix')
+    plot_confusion_matrix(enhanced_results['confusion_matrix'], class_names,
+                          title='Enhanced MLP (Custom) Confusion Matrix')
+    plot_confusion_matrix(sklearn_basic_results['confusion_matrix'], class_names,
+                          title='Scikit-learn MLP (basic) Confusion Matrix')
+    plot_confusion_matrix(sklearn_enhanced_results['confusion_matrix'], class_names,
+                          title='Scikit-learn MLP (enhanced) Confusion Matrix')
+
+    plot_confusion_matrix(svm_results_basic_lib['confusion_matrix'], class_names,
+                          title='Scikit-learn MLP (basic) SVM Confusion Matrix')
+    plot_confusion_matrix(svm_results_enhanced_lib['confusion_matrix'], class_names,
+                          title='Scikit-learn MLP (enhanced) SVM Confusion Matrix')
+    # plot_confusion_matrix(svm_results_basic_mlp['confusion_matrix'], class_names,
+    #                       title='MLP (basic) SVM Confusion Matrix')
+    # plot_confusion_matrix(svm_results_enhanced_mlp['confusion_matrix'], class_names,
+    #                       title='MLP (enhanced) SVM Confusion Matrix')
+
+
+    # Return dictionary with key results (optional)
+    results_dict = {
+        'baseline_mlp_custom': baseline_mlp,
+        'enhanced_mlp_custom': enhanced_mlp,
+        'sklearn_mlp_basic': sklearn_mlp_basic,
+        'sklearn_mlp_enhanced': sklearn_mlp_enhanced,
         'baseline_results': baseline_results,
         'enhanced_results': enhanced_results,
-        'baseline_history': baseline_history,
-        'enhanced_history': enhanced_history,
-        'sklearn_mlp': sklearn_mlp,
-        'sklearn_accuracy': sklearn_accuracy,
-        'sklearn_report': sklearn_report
+        'sklearn_basic_results': sklearn_basic_results,
+        'sklearn_enhanced_results': sklearn_enhanced_results,
     }
-
-
+    return results_dict
 if __name__ == "__main__":
     results = main()
 
