@@ -1,13 +1,16 @@
+from itertools import cycle
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc, precision_score, \
+    f1_score, roc_auc_score
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Dense, Input
 from sklearn.svm import SVC
 import time
 import seaborn as sns
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, label_binarize
 
 from dataset_for_mlp import load_data
 from gnb_simple_52_final import CustomGaussianNB
@@ -17,7 +20,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
 
 
-# Activation functions and their derivatives
+
 class Activations:
     @staticmethod
     def relu(x):
@@ -79,7 +82,6 @@ class MLP:
 
         for i in range(self.n_layers):
             # He initialization for ReLU: sqrt(2/n_in)
-            # Xavier initialization for sigmoid/tanh: sqrt(1/n_in)
             if self.activations[i] == 'relu':
                 scale = np.sqrt(2 / layer_sizes[i])
             else:
@@ -255,14 +257,11 @@ class MLP:
         return np.argmax(probas, axis=1)
 
 
-
-
 # Function to create and preprocess data for the enhanced MLP
 def prepare_data_with_gnb(X_train_orig, X_test_orig, y_train, y_test,
                           apply_feature_selection=False, n_features=40,
                           apply_transformation=True, epsilon=1e-3,
                           class_weight_adjustment=1.2):
-
     #  Feature Selection (to try)
     if apply_feature_selection:
         print(f"Applying SelectKBest to find top {n_features} features...")
@@ -303,19 +302,65 @@ def prepare_data_with_gnb(X_train_orig, X_test_orig, y_train, y_test,
     return X_train_basic, X_test_basic, X_train_enhanced, X_test_enhanced
 
 
-
 def evaluate_model(model, X_test, y_test, model_name="Model", class_names=None):
     print(f"\n--- Evaluating {model_name} ---")
     start_time = time.time()
+
     y_pred = model.predict(X_test)
+
+    try:
+        y_proba = model.predict_proba(X_test)
+    except (AttributeError, NotImplementedError):
+        print(f"Warning: {model_name} does not support predict_proba. ROC curves will not be available.")
+        y_proba = None
+
     prediction_time = time.time() - start_time
 
     accuracy = accuracy_score(y_test, y_pred)
+
+    # Per-class precision
+    precision_per_class = precision_score(y_test, y_pred, average=None)
+    precision_dict = {class_names[i]: precision_per_class[i] for i in range(len(class_names))}
+
+    # F1 score (macro and per-class)
+    f1_macro = f1_score(y_test, y_pred, average='macro')
+    f1_per_class = f1_score(y_test, y_pred, average=None)
+    f1_dict = {class_names[i]: f1_per_class[i] for i in range(len(class_names))}
     cm = confusion_matrix(y_test, y_pred)
+
+    # Compute ROC AUC - needs one-hot encoded y_test
+    y_test_bin = label_binarize(y_test, classes=np.unique(y_test))
+    n_classes = y_test_bin.shape[1]
+
+    # Compute ROC curve and ROC area for each class
+    try:
+        roc_auc = roc_auc_score(y_test_bin, y_proba, multi_class='ovr', average='macro')
+    except ValueError:
+        # Handle potential dimension mismatch
+        print("Warning: Could not compute ROC AUC. Continuing with other metrics.")
+        roc_auc = None
+
+    # Calculate per-class ROC AUC
+    roc_auc_per_class = {}
+    for i in range(n_classes):
+        try:
+            roc_auc_per_class[class_names[i]] = roc_auc_score(y_test_bin[:, i], y_proba[:, i])
+        except (ValueError, IndexError):
+            print(f"Warning: Could not compute ROC AUC for class {class_names[i]}.")
+            roc_auc_per_class[class_names[i]] = None
+
+    # Get classification report
+    if class_names is not None:
+        report = classification_report(y_test, y_pred, target_names=class_names)
+    else:
+        report = classification_report(y_test, y_pred)
 
     print(f"Accuracy: {accuracy:.4f}")
     print(f"Prediction time: {prediction_time:.4f} seconds")
     print("\nClassification Report:")
+
+    if roc_auc is not None:
+        print(f"Macro ROC AUC: {roc_auc:.4f}")
 
     if class_names is not None:
         report = classification_report(y_test, y_pred,
@@ -326,28 +371,163 @@ def evaluate_model(model, X_test, y_test, model_name="Model", class_names=None):
 
     print(report)
 
+    print("\nPrecision for each class:")
+    for genre, prec in precision_dict.items():
+        print(f"{genre}: {prec:.4f}")
+
+    print("\nF1 Score for each class:")
+    for genre, f1 in f1_dict.items():
+        print(f"{genre}: {f1:.4f}")
+
+    if roc_auc is not None:
+        print("\nROC AUC for each class:")
+        for genre, auc_val in roc_auc_per_class.items():
+            if auc_val is not None:
+                print(f"{genre}: {auc_val:.4f}")
+
     return {
         'accuracy': accuracy,
+        'f1_macro': f1_macro,
+        'precision_per_class': precision_dict,
+        'f1_per_class': f1_dict,
         'confusion_matrix': cm,
         'classification_report': report,
         'prediction_time': prediction_time,
-        'y_pred': y_pred
+        'roc_auc': roc_auc,
+        'roc_auc_per_class': roc_auc_per_class,
+        'y_test': y_test,
+        'y_pred': y_pred,
+        'y_proba': y_proba
     }
-
 
 
 def plot_confusion_matrix(cm, class_names, title='Confusion Matrix'):
     """Plot confusion matrix"""
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(12, 10))
+    cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+    # Create two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
+
+    # Plot absolute numbers
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=class_names, yticklabels=class_names)
-    plt.title(title)
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
+                xticklabels=class_names, yticklabels=class_names, ax=ax1)
+    ax1.set_title('Confusion Matrix (Absolute Counts)')
+    ax1.set_ylabel('True Label')
+    ax1.set_xlabel('Predicted Label')
+
+    # Plot percentages
+    sns.heatmap(cm_norm, annot=True, fmt='.2%', cmap='Greens',
+                xticklabels=class_names, yticklabels=class_names, ax=ax2)
+    ax2.set_title('Confusion Matrix (Normalized by True Class)')
+    ax2.set_ylabel('True Label')
+    ax2.set_xlabel('Predicted Label')
+
     plt.tight_layout()
     plt.show()
 
 
+def plot_roc_curves(y_test, y_proba, class_names):
+
+    y_test_bin = label_binarize(y_test, classes=np.unique(y_test))
+    n_classes = y_test_bin.shape[1]
+
+    # Compute ROC curve and ROC area for each class
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
+
+    for i in range(n_classes):
+        fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_proba[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
+
+    # Plot all ROC curves
+    plt.figure(figsize=(12, 10))
+    colors = cycle(['blue', 'red', 'green', 'navy', 'turquoise',
+                    'darkorange', 'cornflowerblue', 'teal', 'purple', 'gold'])
+
+    for i, color, name in zip(range(n_classes), colors, class_names):
+        plt.plot(fpr[i], tpr[i], color=color, lw=2,
+                 label=f'{name} (AUC = {roc_auc[i]:.2f})')
+
+    plt.plot([0, 1], [0, 1], 'k--', lw=2)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curves for Each Music Genre')
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+
+# Function to get probabilities for a single sample
+def get_genre_probabilities(model, sample, class_names):
+
+    if isinstance(sample, pd.DataFrame):
+        X = sample
+    else:
+        X = pd.DataFrame([sample])
+
+    # Get probability predictions
+    probabilities = model.predict_proba(X)[0]
+
+    # Create a dictionary with genre names and their probabilities
+    genre_probs = {genre: prob for genre, prob in zip(class_names, probabilities)}
+
+    # Sort by probability in descending order
+    genre_probs = {k: v for k, v in sorted(genre_probs.items(), key=lambda item: item[1], reverse=True)}
+
+    return genre_probs
+
+
+def plot_per_class_metrics(precision_dict, f1_dict, roc_auc_dict=None):
+
+    class_names = list(precision_dict.keys())
+    precision_values = list(precision_dict.values())
+    f1_values = list(f1_dict.values())
+
+    if roc_auc_dict:
+        roc_auc_values = [roc_auc_dict.get(name, 0) for name in class_names]
+        width = 0.25  # Width of bars
+
+        plt.figure(figsize=(14, 8))
+        x = np.arange(len(class_names))
+
+        plt.bar(x - width, precision_values, width, label='Precision', color='skyblue')
+        plt.bar(x, f1_values, width, label='F1 Score', color='lightgreen')
+        plt.bar(x + width, roc_auc_values, width, label='ROC AUC', color='salmon')
+
+        plt.xlabel('Genre')
+        plt.ylabel('Score')
+        plt.title('Per-Class Performance Metrics')
+        plt.xticks(x, class_names, rotation=45, ha='right')
+        plt.legend(loc='lower right')
+        plt.ylim(0, 1.1)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+    else:
+        width = 0.35  # Width of bars
+
+        plt.figure(figsize=(14, 8))
+        x = np.arange(len(class_names))
+
+        plt.bar(x - width / 2, precision_values, width, label='Precision', color='skyblue')
+        plt.bar(x + width / 2, f1_values, width, label='F1 Score', color='lightgreen')
+
+        plt.xlabel('Genre')
+        plt.ylabel('Score')
+        plt.title('Per-Class Precision and F1 Scores')
+        plt.xticks(x, class_names, rotation=45, ha='right')
+        plt.legend(loc='lower right')
+        plt.ylim(0, 1.1)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+    plt.show()
 
 def plot_training_history(history, title='Training History'):
     """Plot training history"""
@@ -374,7 +554,6 @@ def plot_training_history(history, title='Training History'):
     plt.suptitle(title)
     plt.tight_layout()
     plt.show()
-
 
 
 def main():
@@ -433,10 +612,6 @@ def main():
         verbose=True
     )
 
-
-
-
-
     # 6. Define network architecture for enhanced MLP
     enhanced_layers = [n_features_enhanced, 128, 64, n_classes]
     enhanced_activations = ['relu', 'relu', 'softmax']
@@ -454,9 +629,6 @@ def main():
         verbose=True
     )
 
-
-
-
     # 7. Evaluate custom models
     baseline_results = evaluate_model(
         baseline_mlp, X_test_basic, y_test,
@@ -470,9 +642,29 @@ def main():
         class_names=class_names
     )
 
-    # Plot custom model histories
+    # Plot training history
     plot_training_history(baseline_history, title='Baseline MLP (Custom) Training History')
     plot_training_history(enhanced_history, title='Enhanced MLP (Custom) Training History')
+
+    # Plot per-class metrics for custom models
+    plot_per_class_metrics(
+        baseline_results['precision_per_class'],
+        baseline_results['f1_per_class'],
+        baseline_results['roc_auc_per_class']
+    )
+
+    plot_per_class_metrics(
+        enhanced_results['precision_per_class'],
+        enhanced_results['f1_per_class'],
+        enhanced_results['roc_auc_per_class']
+    )
+
+    # Plot ROC curves for custom models if y_proba is available
+    if baseline_results['y_proba'] is not None:
+        plot_roc_curves(baseline_results['y_test'], baseline_results['y_proba'], class_names)
+
+    if enhanced_results['y_proba'] is not None:
+        plot_roc_curves(enhanced_results['y_test'], enhanced_results['y_proba'], class_names)
 
     # --- Scikit-learn Models ---
 
@@ -490,7 +682,7 @@ def main():
                                       random_state=42,
                                       verbose=False)  # Quieter training
 
-# Fit on the basic training data
+    # Fit on the basic training data
     print("Fitting sklearn MLP (basic)...")
     sklearn_mlp_basic.fit(X_train_basic, y_train)
     print("Fitting done.")
@@ -528,7 +720,25 @@ def main():
         class_names=class_names
     )
 
-    # Done with scikit-learn MLP
+    # Plot per-class metrics for sklearn models
+    plot_per_class_metrics(
+        sklearn_basic_results['precision_per_class'],
+        sklearn_basic_results['f1_per_class'],
+        sklearn_basic_results['roc_auc_per_class']
+    )
+
+    plot_per_class_metrics(
+        sklearn_enhanced_results['precision_per_class'],
+        sklearn_enhanced_results['f1_per_class'],
+        sklearn_enhanced_results['roc_auc_per_class']
+    )
+
+    # Plot ROC curves for sklearn models if y_proba is available
+    if sklearn_basic_results['y_proba'] is not None:
+        plot_roc_curves(sklearn_basic_results['y_test'], sklearn_basic_results['y_proba'], class_names)
+
+    if sklearn_enhanced_results['y_proba'] is not None:
+        plot_roc_curves(sklearn_enhanced_results['y_test'], sklearn_enhanced_results['y_proba'], class_names)
 
     # ---Moving to SVM---
     print("\n--- Training scikit-learn MLPClassifier+library SVM ---")
@@ -537,122 +747,144 @@ def main():
         return np.maximum(0, X)
 
     def extract_mlp_features(X, model):
-        W1, W2, W3 = model.coefs_[0], model.coefs_[1], model.coefs_[2]
-        b1, b2, b3 = model.intercepts_[0], model.intercepts_[1], model.intercepts_[2]
+        # For scikit-learn MLP
+        if hasattr(model, 'coefs_'):
+            W1, W2 = model.coefs_[0], model.coefs_[1]
+            b1, b2 = model.intercepts_[0], model.intercepts_[1]
+            h1 = relu(np.dot(X, W1) + b1)
+            return relu(np.dot(h1, W2) + b2)
+        else:
 
-        h1 = relu(np.dot(X, W1) + b1)
-        h2 = relu(np.dot(h1, W2) + b2)
-        return h2
+            activations, _ = model.forward(X)
+            return activations[-2]  # Return the second-to-last layer activations
 
-    # Step 1: Extract features from MLP hidden layer
+
     print("Extracting MLP hidden features...")
     X_train_mlp_features_baslib = extract_mlp_features(X_train_basic, sklearn_mlp_basic)
     X_test_mlp_features_baslib = extract_mlp_features(X_test_basic, sklearn_mlp_basic)
 
-    # Normalize hidden outputs
     scaler = StandardScaler()
     X_train_mlp_features_baslib = scaler.fit_transform(X_train_mlp_features_baslib)
     X_test_mlp_features_baslib = scaler.transform(X_test_mlp_features_baslib)
 
-    # Step 2: Train SVM on hidden features
-    svm_lib = SVC(kernel='rbf', C=10, gamma='scale')
+
+    svm_lib = SVC(kernel='rbf', C=10, gamma='scale', probability=True)  # Added probability=True for ROC curves
     svm_lib.fit(X_train_mlp_features_baslib, y_train)
 
-    print("\n--- SVM on MLP Hidden Features ---")
+    print("\n--- SVM on Basic MLP Hidden Features ---")
     svm_results_basic_lib = evaluate_model(
         svm_lib, X_test_mlp_features_baslib, y_test,
-        model_name="SVM on MLP Hidden Features",
+        model_name="SVM on Basic MLP Hidden Features",
         class_names=class_names
     )
 
-    print("\n--- Training scikit-learn MLPClassifier+SVM+NB ---")
+    print("\n--- Training SVM on Enhanced MLP Features ---")
 
-    # Step 1: Extract features from MLP hidden layer
+
     X_train_mlp_features_enhlib = extract_mlp_features(X_train_enhanced, sklearn_mlp_enhanced)
     X_test_mlp_features_enhlib = extract_mlp_features(X_test_enhanced, sklearn_mlp_enhanced)
 
-    # (Optional) Normalize hidden outputs
     scaler = StandardScaler()
     X_train_mlp_features_enhlib = scaler.fit_transform(X_train_mlp_features_enhlib)
     X_test_mlp_features_enhlib = scaler.transform(X_test_mlp_features_enhlib)
 
-    # Step 2: Train SVM on hidden features
-    svm_enhanced_lib = SVC(kernel='rbf', C=10, gamma='scale')
+
+    svm_enhanced_lib = SVC(kernel='rbf', C=10, gamma='scale', probability=True)
     svm_enhanced_lib.fit(X_train_mlp_features_enhlib, y_train)
 
-    # Step 3: Predict and evaluate
-    print("\n--- SVM on MLP Hidden Features ---")
+
+    print("\n--- SVM on Enhanced MLP Hidden Features ---")
     svm_results_enhanced_lib = evaluate_model(
         svm_enhanced_lib, X_test_mlp_features_enhlib, y_test,
-        model_name="SVM on MLP Hidden Features+NB",
+        model_name="SVM on Enhanced MLP Hidden Features",
         class_names=class_names
     )
 
-    # print("\n--- Training MLPClassifier+SVM ---")
-    #
-    # # Step 1: Extract features from MLP hidden layer
-    # X_train_mlp_features_basmlp = extract_mlp_features(X_train_basic, baseline_mlp)
-    # X_test_mlp_features_basmlp = extract_mlp_features(X_test_basic, baseline_mlp)
-    #
-    # # (Optional) Normalize hidden outputs
-    # scaler = StandardScaler()
-    # X_train_mlp_features_basmlp = scaler.fit_transform(X_train_mlp_features_basmlp)
-    # X_test_mlp_features_basmlp = scaler.transform(X_test_mlp_features_basmlp)
-    #
-    # # Step 2: Train SVM on hidden features
-    # svm = SVC(kernel='rbf', C=10, gamma='scale')
-    # svm.fit(X_train_mlp_features_basmlp, y_train)
-    #
-    # # Step 3: Predict and evaluate
-    # print("\n--- SVM on MLP Hidden Features ---")
-    # svm_results_basic_mlp = evaluate_model(
-    #     svm, X_test_mlp_features_basmlp, y_test,
-    #     model_name="SVM on MLP Hidden Features+NB",
-    #     class_names=class_names
-    # )
-    #
-    # print("\n--- Training MLPClassifier+SVM+NB ---")
-    #
-    # # Step 1: Extract features from MLP hidden layer
-    # X_train_mlp_features_enhmlp = extract_mlp_features(X_train_basic, enhanced_mlp)
-    # X_test_mlp_features_enhmlp = extract_mlp_features(X_test_basic, enhanced_mlp)
-    #
-    # # (Optional) Normalize hidden outputs
-    # scaler = StandardScaler()
-    # X_train_mlp_features_enhmlp = scaler.fit_transform(X_train_mlp_features_enhmlp)
-    # X_test_mlp_features_enhmlp = scaler.transform(X_test_mlp_features_enhmlp)
-    #
-    # # Step 2: Train SVM on hidden features
-    # svm_enhanced = SVC(kernel='rbf', C=10, gamma='scale')
-    # svm_enhanced.fit(X_train_mlp_features_enhmlp, y_train)
-    #
-    # # Step 3: Predict and evaluate
-    # print("\n--- SVM on MLP Hidden Features ---")
-    # svm_results_enhanced_mlp = evaluate_model(
-    #     svm_enhanced, X_test_mlp_features_enhmlp, y_test,
-    #     model_name="SVM on MLP Hidden Features+NB",
-    #     class_names=class_names
-    # )
+
+    plot_per_class_metrics(
+        svm_results_basic_lib['precision_per_class'],
+        svm_results_basic_lib['f1_per_class'],
+        svm_results_basic_lib['roc_auc_per_class']
+    )
+
+    plot_per_class_metrics(
+        svm_results_enhanced_lib['precision_per_class'],
+        svm_results_enhanced_lib['f1_per_class'],
+        svm_results_enhanced_lib['roc_auc_per_class']
+    )
+
+    # Plot ROC curves for SVM models if y_proba is available
+    if svm_results_basic_lib['y_proba'] is not None:
+        plot_roc_curves(svm_results_basic_lib['y_test'], svm_results_basic_lib['y_proba'], class_names)
+
+    if svm_results_enhanced_lib['y_proba'] is not None:
+        plot_roc_curves(svm_results_enhanced_lib['y_test'], svm_results_enhanced_lib['y_proba'], class_names)
 
 
+    try:
+        print("\n--- Training SVM on Custom MLP Features ---")
 
+        # Extract features from custom MLPs
+        X_train_mlp_features_custom_basic = extract_mlp_features(X_train_basic, baseline_mlp)
+        X_test_mlp_features_custom_basic = extract_mlp_features(X_test_basic, baseline_mlp)
 
+        X_train_mlp_features_custom_enhanced = extract_mlp_features(X_train_enhanced, enhanced_mlp)
+        X_test_mlp_features_custom_enhanced = extract_mlp_features(X_test_enhanced, enhanced_mlp)
 
-    # Final Comparison
-    print("\n--- Final Model Comparison ---")
-    print(f"Baseline MLP (Custom) Accuracy:                {baseline_results['accuracy']:.4f}")
-    print(f"Enhanced MLP (Custom) Accuracy:                {enhanced_results['accuracy']:.4f}")
-    print("-" * 50)
-    print(f"Scikit-learn MLP (basic) Accuracy:             {sklearn_basic_results['accuracy']:.4f}")
-    print(f"Scikit-learn MLP (enhanced) Accuracy:          {sklearn_enhanced_results['accuracy']:.4f}")
-    #svm
-    print(f"Scikit-learn MLP (basic) SVM Accuracy:          {svm_results_basic_lib['accuracy']:.4f}")
-    print(f"Scikit-learn MLP (enhanced) SVM Accuracy:          {svm_results_enhanced_lib['accuracy']:.4f}")
-    # print(f" MLP (basic) SVM Accuracy:          {svm_results_basic_mlp['accuracy']:.4f}")
-    # print(f"MLP (enhanced) SVM Accuracy:          {svm_results_enhanced_mlp['accuracy']:.4f}")
+        # Normalize
+        scaler_custom_basic = StandardScaler()
+        X_train_mlp_features_custom_basic = scaler_custom_basic.fit_transform(X_train_mlp_features_custom_basic)
+        X_test_mlp_features_custom_basic = scaler_custom_basic.transform(X_test_mlp_features_custom_basic)
 
+        scaler_custom_enhanced = StandardScaler()
+        X_train_mlp_features_custom_enhanced = scaler_custom_enhanced.fit_transform(
+            X_train_mlp_features_custom_enhanced)
+        X_test_mlp_features_custom_enhanced = scaler_custom_enhanced.transform(X_test_mlp_features_custom_enhanced)
 
-    # Plot confusion matrices for key models
+        # Train SVMs
+        svm_custom_basic = SVC(kernel='rbf', C=10, gamma='scale', probability=True)
+        svm_custom_basic.fit(X_train_mlp_features_custom_basic, y_train)
+
+        svm_custom_enhanced = SVC(kernel='rbf', C=10, gamma='scale', probability=True)
+        svm_custom_enhanced.fit(X_train_mlp_features_custom_enhanced, y_train)
+
+        # Evaluate
+        svm_results_custom_basic = evaluate_model(
+            svm_custom_basic, X_test_mlp_features_custom_basic, y_test,
+            model_name="SVM on Custom Basic MLP Features",
+            class_names=class_names
+        )
+
+        svm_results_custom_enhanced = evaluate_model(
+            svm_custom_enhanced, X_test_mlp_features_custom_enhanced, y_test,
+            model_name="SVM on Custom Enhanced MLP Features",
+            class_names=class_names
+        )
+
+        # Plot for custom MLP + SVM models
+        plot_per_class_metrics(
+            svm_results_custom_basic['precision_per_class'],
+            svm_results_custom_basic['f1_per_class'],
+            svm_results_custom_basic['roc_auc_per_class']
+        )
+
+        plot_per_class_metrics(
+            svm_results_custom_enhanced['precision_per_class'],
+            svm_results_custom_enhanced['f1_per_class'],
+            svm_results_custom_enhanced['roc_auc_per_class']
+        )
+
+        if svm_results_custom_basic['y_proba'] is not None:
+            plot_roc_curves(svm_results_custom_basic['y_test'], svm_results_custom_basic['y_proba'], class_names)
+
+        if svm_results_custom_enhanced['y_proba'] is not None:
+            plot_roc_curves(svm_results_custom_enhanced['y_test'], svm_results_custom_enhanced['y_proba'], class_names)
+
+    except Exception as e:
+        print(f"Error with custom MLP feature extraction: {e}")
+        print("Skipping SVM on custom MLP features evaluation.")
+
+    # Plot confusion matrices for all models
     plot_confusion_matrix(baseline_results['confusion_matrix'], class_names,
                           title='Baseline MLP (Custom) Confusion Matrix')
     plot_confusion_matrix(enhanced_results['confusion_matrix'], class_names,
@@ -661,29 +893,105 @@ def main():
                           title='Scikit-learn MLP (basic) Confusion Matrix')
     plot_confusion_matrix(sklearn_enhanced_results['confusion_matrix'], class_names,
                           title='Scikit-learn MLP (enhanced) Confusion Matrix')
-
     plot_confusion_matrix(svm_results_basic_lib['confusion_matrix'], class_names,
-                          title='Scikit-learn MLP (basic) SVM Confusion Matrix')
+                          title='SVM on Basic MLP Features Confusion Matrix')
     plot_confusion_matrix(svm_results_enhanced_lib['confusion_matrix'], class_names,
-                          title='Scikit-learn MLP (enhanced) SVM Confusion Matrix')
-    # plot_confusion_matrix(svm_results_basic_mlp['confusion_matrix'], class_names,
-    #                       title='MLP (basic) SVM Confusion Matrix')
-    # plot_confusion_matrix(svm_results_enhanced_mlp['confusion_matrix'], class_names,
-    #                       title='MLP (enhanced) SVM Confusion Matrix')
+                          title='SVM on Enhanced MLP Features Confusion Matrix')
 
+    # # Optionally inspect raw probabilities for a few samples
+    # print("\n--- Sample Genre Probabilities ---")
+    # # Take first test sample as an example
+    # sample_idx = 0
+    # print(f"\nSample {sample_idx} (True class: {class_names[y_test[sample_idx]]})")
+    #
+    # print("Baseline MLP probabilities:")
+    # print(get_genre_probabilities(baseline_mlp, X_test_basic[sample_idx:sample_idx + 1], class_names))
+    #
+    # print("\nEnhanced MLP probabilities:")
+    # print(get_genre_probabilities(enhanced_mlp, X_test_enhanced[sample_idx:sample_idx + 1], class_names))
+    #
+    # print("\nScikit-learn Basic MLP probabilities:")
+    # print(get_genre_probabilities(sklearn_mlp_basic, X_test_basic[sample_idx:sample_idx + 1], class_names))
+    #
+    # print("\nScikit-learn Enhanced MLP probabilities:")
+    # print(get_genre_probabilities(sklearn_mlp_enhanced, X_test_enhanced[sample_idx:sample_idx + 1], class_names))
 
-    # Return dictionary with key results (optional)
-    results_dict = {
+    # Final Accuracy Comparison Table
+    print("\n--- Final Model Comparison ---")
+    results_table = {
+        "Model": [
+            "Baseline MLP (Custom)",
+            "Enhanced MLP (Custom)",
+            "Scikit-learn MLP (basic)",
+            "Scikit-learn MLP (enhanced)",
+            "SVM on Basic MLP Features",
+            "SVM on Enhanced MLP Features"
+        ],
+        "Accuracy": [
+            baseline_results['accuracy'],
+            enhanced_results['accuracy'],
+            sklearn_basic_results['accuracy'],
+            sklearn_enhanced_results['accuracy'],
+            svm_results_basic_lib['accuracy'],
+            svm_results_enhanced_lib['accuracy']
+        ],
+        "F1 (macro)": [
+            baseline_results['f1_macro'],
+            enhanced_results['f1_macro'],
+            sklearn_basic_results['f1_macro'],
+            sklearn_enhanced_results['f1_macro'],
+            svm_results_basic_lib['f1_macro'],
+            svm_results_enhanced_lib['f1_macro']
+        ],
+        "ROC AUC": [
+            baseline_results['roc_auc'],
+            enhanced_results['roc_auc'],
+            sklearn_basic_results['roc_auc'],
+            sklearn_enhanced_results['roc_auc'],
+            svm_results_basic_lib['roc_auc'],
+            svm_results_enhanced_lib['roc_auc']
+        ],
+        "Prediction Time (s)": [
+            baseline_results['prediction_time'],
+            enhanced_results['prediction_time'],
+            sklearn_basic_results['prediction_time'],
+            sklearn_enhanced_results['prediction_time'],
+            svm_results_basic_lib['prediction_time'],
+            svm_results_enhanced_lib['prediction_time']
+        ]
+    }
+
+    # Creating a DataFrame for better display
+    try:
+        results_df = pd.DataFrame(results_table)
+        print(results_df.to_string(index=False))
+    except:
+
+        for i in range(len(results_table["Model"])):
+            model = results_table["Model"][i]
+            acc = results_table["Accuracy"][i]
+            f1 = results_table["F1 (macro)"][i]
+            roc = results_table["ROC AUC"][i]
+            time = results_table["Prediction Time (s)"][i]
+            print(f"{model}: Acc={acc:.4f}, F1={f1:.4f}, ROC AUC={roc:.4f}, Time={time:.4f}s")
+
+    # Return dictionary with key results
+    return {
         'baseline_mlp_custom': baseline_mlp,
         'enhanced_mlp_custom': enhanced_mlp,
         'sklearn_mlp_basic': sklearn_mlp_basic,
         'sklearn_mlp_enhanced': sklearn_mlp_enhanced,
+        'svm_basic': svm_lib,
+        'svm_enhanced': svm_enhanced_lib,
         'baseline_results': baseline_results,
         'enhanced_results': enhanced_results,
         'sklearn_basic_results': sklearn_basic_results,
         'sklearn_enhanced_results': sklearn_enhanced_results,
+        'svm_basic_results': svm_results_basic_lib,
+        'svm_enhanced_results': svm_results_enhanced_lib,
+        'class_names': class_names
     }
-    return results_dict
+
+
 if __name__ == "__main__":
     results = main()
-
