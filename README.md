@@ -96,18 +96,3 @@ The scripts are designed to run specific experiments or parts of the pipeline:
 *   Amina Aimuratova (amina.aimuratova@nu.edu.kz)
 
 School of Engineering and Digital Sciences, Nazarbayev University, Astana, Kazakhstan.
-
-## 📄 Citation
-
-If you use this code or research in your work, please consider citing the original paper (once published or available on a preprint server). For now, you can refer to this repository.
-
-*(Awaiting formal publication details for a BibTeX entry.)*
-
-## ⚖️ License
-
-Please specify a license for your project (e.g., MIT, Apache 2.0). If not specified, it defaults to standard copyright laws. Example:
-This project is licensed under the MIT License - see the `LICENSE.md` file for details (if you add one).
-
----
-
-Feel free to update the "Repository Structure," "Usage," "Dependencies," and "License" sections as needed to accurately reflect your project. You might also want to add a `LICENSE.md` file.
