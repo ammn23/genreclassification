@@ -10,9 +10,9 @@ We explore different machine learning approaches for music genre classification.
 
 ## Key Findings
 
-<img width="740" height="170" alt="image" src="https://github.com/user-attachments/assets/27ff43ec-4f76-4d40-bba6-b929094bd7ff" />
 
 <img width="1060" height="181" alt="image" src="https://github.com/user-attachments/assets/dc898322-4e8c-4036-88c0-49fa9518cb74" />
+<img width="740" height="170" alt="image" src="https://github.com/user-attachments/assets/27ff43ec-4f76-4d40-bba6-b929094bd7ff" />
 
 
 *   **MLP + SVM:** Achieved approximately 90% accuracy and F1-score.
