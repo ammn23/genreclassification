@@ -29,7 +29,6 @@ This repository contains the following key scripts and files:
 *   `.gitignore`: Specifies intentionally untracked files that Git should ignore.
 *   `README.md`: This file.
 
-*(Note: Implementations for CRNN models, while discussed in the paper, might be located in separate scripts not listed or integrated within existing ones. Please update if necessary.)*
 
 ## ⚙️ Setup & Installation
 
